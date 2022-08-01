@@ -1,7 +1,7 @@
 # sibnet
-Saliency Inductive Bias Net
+## Saliency Inductive Bias Net
 
-This is the official repository for SIBNet, Saliency Inductive Bias Net. 
+### This is the official repository for SIBNet, Saliency Inductive Bias Net. 
 
 From study:
 Interpretability-Guided Inductive Bias For Deep Learning Based Medical Image Classification And Segmentation
@@ -27,3 +27,5 @@ used for medical imaging applications, and yields improved learning rates, model
 robustness, and model interpretability.
 
 This repository includes the basic fundamental elements of SIBNet to get reseaerchers started into using it. 
+![SIBNet AUC Benchmarking](/SIBNet_AUC.png)
+![SIBNet Enhanced saliencymaps](/SIBNet_Saliencies.png)
