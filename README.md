@@ -7,7 +7,7 @@ From study:
 Interpretability-Guided Inductive Bias For Deep Learning Based Medical Image Classification And Segmentation
 Authors: Dwarikanath Mahapatra, Alexander Poellinger, Mauricio Reyes
 Published at the Medical Image Analysis Journal.
-[https://doi.org/10.1016/j.media.2022.102551](url)
+[https://doi.org/10.1016/j.media.2022.102551][https://doi.org/10.1016/j.media.2022.102551]
 
 Abstract: Deep learning methods provide state of the art performance for supervised learning
 based medical image analysis. However it is essential that trained models extract
