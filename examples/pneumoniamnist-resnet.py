@@ -131,7 +131,7 @@ def main(sibnetloss_on: bool, cd_loss_weight: float, sc_loss_weight: float, num_
                 upsampled_attr = [LayerAttribution.interpolate(attr, torch.squeeze(inputs[0]).shape) for attr in
                                   attr_classes]
 
-                sccriterion = sibnet_losses.SimilarityCoherence(device=device, kernel_size=9)
+                sccriterion = sibnet_losses.SpatialCoherence(device=device, kernel_size=9)
                 scloss = sccriterion(upsampled_attr, device)
 
                 loss += cd_loss_weight * cdloss + sc_loss_weight * scloss
