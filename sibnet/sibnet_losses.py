@@ -22,7 +22,7 @@ class ClassDistinctivenessLoss(nn.Module):
         return torch.mean(loss_list)
 
 
-class SimilarityCoherence(nn.Module):
+class SpatialCoherence(nn.Module):
     def __init__(self, device, kernel_size):
         super().__init__()
         self.kernel_size = kernel_size
