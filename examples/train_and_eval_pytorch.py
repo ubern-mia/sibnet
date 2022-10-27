@@ -1,3 +1,4 @@
+import sys
 import os
 import argparse
 import time
@@ -13,19 +14,25 @@ from torchvision.models import resnet18, resnet50
 from tensorboardX import SummaryWriter
 from collections import OrderedDict
 from models import ResNet18, ResNet50
-from captum.attr import LayerGradCam, LayerAttribution
+from captum.attr import LayerGradCam, LayerAttribution, visualization
+import matplotlib.pyplot as plt
 
 import medmnist
 from medmnist import INFO
+sys.path.append(os.path.join(sys.path[0], ".."))
+
 from sibnet import evaluator
 from sibnet import sibnet_losses
 
 
 def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resize, as_rgb, run, cdloss,
-         cdloss_weight, scloss, scloss_weigh):
+         cdloss_weight, scloss, scloss_weight, save_attrmaps):
     lr = 0.001
     gamma = 0.1
     milestones = [0.5 * num_epochs, 0.75 * num_epochs]
+    print(scloss)
+    print("SC loss: " + str(scloss))
+    print("CD loss: " + str(cdloss))
 
     info = INFO[data_flag]
     task = info['task']
@@ -48,7 +55,6 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resi
     output_root = os.path.join(output_root, data_flag, time.strftime("%y%m%d_%H%M%S"))
     if not os.path.exists(output_root):
         os.makedirs(output_root)
-
     print('==> Preparing data...')
 
     if resize:
@@ -95,38 +101,47 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resi
     logs = ['loss', 'wceloss', 'cdloss', 'scloss', 'auc', 'acc', 'balacc']
     train_logs = [log + '/train' for log in logs]
     val_logs = [log + '/val' for log in logs]
-    # test_logs = ['test_' + log for log in logs]
-    # log_dict = OrderedDict.fromkeys(train_logs + val_logs + test_logs, 0)
-    log_dict = OrderedDict.fromkeys(train_logs + val_logs, 0)
+    test_logs = [log + '/test' for log in logs]
 
-    writer = SummaryWriter(log_dir=os.path.join(output_root, 'Tensorboard_Results'))
+    log_dict = OrderedDict.fromkeys(train_logs + val_logs + test_logs, 0)
+
+    writer = SummaryWriter(log_dir=os.path.join(output_root, run))
 
     best_auc = 0
     best_epoch = 0
     best_model = model
 
     global iteration
+    global test_iteration
     global scloss_scale
+    global cdloss_scale
+    global wceloss_scale
+
+    wceloss_scale = 1
     scloss_scale = 1
+    cdloss_scale = 1
+
     iteration = 0
+    test_iteration = 0
 
     for epoch in trange(num_epochs):
 
         train_loss = train(model, train_loader, cdloss, scloss, optimizer, device, writer, n_classes)
 
+        # only save the attribution maps for the test set, in case this option is selected
         train_metrics = test(model, train_evaluator, train_loader_at_eval, task, device, run, n_classes, cdloss,
-         cdloss_weight, scloss, scloss_weight)
+         cdloss_weight, scloss, scloss_weight, output_root, epoch, save_attrmaps=False)
         val_metrics = test(model, val_evaluator, val_loader, task, device, run, n_classes, cdloss,
-         cdloss_weight, scloss, scloss_weight)
+         cdloss_weight, scloss, scloss_weight, output_root, epoch, save_attrmaps=False)
         test_metrics = test(model, test_evaluator, test_loader, task, device, run, n_classes, cdloss,
-         cdloss_weight, scloss, scloss_weight)
-
-        # scheduler.step()
+         cdloss_weight, scloss, scloss_weight, output_root, epoch, save_attrmaps)
 
         for i, key in enumerate(train_logs):
             log_dict[key] = train_metrics[i]
         for i, key in enumerate(val_logs):
             log_dict[key] = val_metrics[i]
+        for i, key in enumerate(test_logs):
+            log_dict[key] = test_metrics[i]
 
         for key, value in log_dict.items():
             writer.add_scalar(key, value, epoch)
@@ -147,13 +162,12 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resi
     torch.save(state, path)
 
     train_metrics = test(best_model, train_evaluator, train_loader_at_eval, task, device, run, n_classes, cdloss,
-         cdloss_weight, scloss, scloss_weight, output_root)
+         cdloss_weight, scloss, scloss_weight, output_root, save_attrmaps)
     val_metrics = test(best_model, val_evaluator, val_loader, task, device, run, n_classes, cdloss,
-         cdloss_weight, scloss, scloss_weight, output_root)
+         cdloss_weight, scloss, scloss_weight, output_root, save_attrmaps)
     test_metrics = test(best_model, test_evaluator, test_loader, task, device, run, n_classes, cdloss,
-         cdloss_weight, scloss, scloss_weight, output_root)
+         cdloss_weight, scloss, scloss_weight, output_root, save_attrmaps)
 
-    # [test_loss, test_loss_wce, test_loss_cd, test_loss_sc, auc, acc, balacc]
     train_log = 'train  auc: %.5f  acc: %.5f bal_acc: %.5f\n' % (train_metrics[-3], train_metrics[-2], train_metrics[-1])
     val_log = 'val  auc: %.5f  acc: %.5f bal_acc: %.5f\n' % (val_metrics[-3], val_metrics[-2], train_metrics[-1])
     test_log = 'test  auc: %.5f  acc: %.5f bal_acc: %.5f\n' % (test_metrics[-3], test_metrics[-2], train_metrics[-1])
@@ -170,7 +184,9 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resi
 def train(model, train_loader, cdloss, scloss, optimizer, device, writer, n_classes):
     total_loss = []
     global iteration
+    global wceloss_scale
     global scloss_scale
+    global cdloss_scale
 
     model.train()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
@@ -190,7 +206,13 @@ def train(model, train_loader, cdloss, scloss, optimizer, device, writer, n_clas
 
         targets = torch.squeeze(targets, 1).long().to(device)
 
-        loss = criterion(outputs, targets)
+        wceloss = criterion(outputs, targets)
+
+        if iteration == 0:
+            wceloss_scale = 1 / wceloss.item()
+
+        wceloss *= wceloss_scale
+        loss = wceloss
 
         if cdloss or scloss:
             cam = LayerGradCam(model, layer=model.layer4)
@@ -199,18 +221,19 @@ def train(model, train_loader, cdloss, scloss, optimizer, device, writer, n_clas
             if cdloss:
                 cdcriterion = sibnet_losses.ClassDistinctivenessLoss(device=device)
                 cdloss_value = cdcriterion(attr_classes)
-                loss += cdloss_value
+                if iteration == 0:
+                    cdloss_scale = 1 / cdloss_value.item()
+                loss += cdloss_scale * cdloss_value
 
             if scloss:
                 upsampled_attr_val = [LayerAttribution.interpolate(attr, torch.squeeze(inputs[0]).shape) for
                                       attr in attr_classes]
                 sccriterion = sibnet_losses.SpatialCoherenceConv(device=device, kernel_size=9)
-                scloss_value = scloss_scale * sccriterion(upsampled_attr_val, device=device)
-
+                scloss_value = sccriterion(upsampled_attr_val, device=device)
+                if iteration == 0:
+                    scloss_scale = 1 / scloss_value.item()
+                scloss_value *= scloss_scale
                 loss += scloss_value
-
-        if iteration == 1 and scloss:
-            scloss_scale = 1 / scloss_value.item()
 
         total_loss.append(loss.item())
         writer.add_scalar('train_loss_logs', loss.item(), iteration)
@@ -224,13 +247,22 @@ def train(model, train_loader, cdloss, scloss, optimizer, device, writer, n_clas
 
 
 def test(model, evaluator, data_loader, task, device, run, n_classes, cdloss,
-         cdloss_weight, scloss, scloss_weight, save_folder=None):
+         cdloss_weight, scloss, scloss_weight, output_root, epoch, save_attrmaps, save_folder=None):
     model.eval()
+
+    output_saliencymaps = os.path.join(output_root, "images")
+    if not os.path.exists(output_saliencymaps):
+        os.makedirs(output_saliencymaps)
 
     total_loss = []
     total_loss_wce = []
     total_loss_cd = []
     total_loss_sc = []
+
+    global test_iteration
+    global wceloss_scale
+    global scloss_scale
+    global cdloss_scale
 
     y_score = torch.tensor([]).to(device)
 
@@ -251,31 +283,38 @@ def test(model, evaluator, data_loader, task, device, run, n_classes, cdloss,
             ce_weights = torch.Tensor(data_hist).to(device)
             criterion = nn.CrossEntropyLoss(weight=ce_weights)
 
-            wceloss = criterion(outputs, targets)
+            wceloss = wceloss_scale * criterion(outputs, targets)
             loss = wceloss
 
-            cdloss_value = torch.Tensor([np.NaN])
-            scloss_value = torch.Tensor([np.NaN])
+            cam = LayerGradCam(model, layer=model.layer4)
+            attr_classes = [torch.Tensor(cam.attribute(inputs, [i] * inputs.shape[0])) for i in range(n_classes)]
 
-            if cdloss or scloss:
-                cam = LayerGradCam(model, layer=model.layer4)
-                attr_classes = [torch.Tensor(cam.attribute(inputs, [i] * inputs.shape[0])) for i in range(n_classes)]
+            # if the sibnet losses are not on, we have to calculate the scaling at test time for a consistent evaluation
+            cdcriterion = sibnet_losses.ClassDistinctivenessLoss(device=device)
+            cdloss_value = cdcriterion(attr_classes)
+            if (test_iteration == 0) and (not cdloss):
+               cdloss_scale = 1 / cdloss_value.item()
+            cdloss_value *= cdloss_scale
 
-                if cdloss:
-                    cdcriterion = sibnet_losses.ClassDistinctivenessLoss(device=device)
-                    cdloss_value = cdcriterion(attr_classes)
-                    loss += cdloss_weight * cdloss_value
+            if cdloss:
+                loss += cdloss_weight * cdloss_value
 
-                if scloss:
-                    upsampled_attr_val = [LayerAttribution.interpolate(attr, torch.squeeze(inputs[0]).shape) for
-                                          attr in attr_classes]
-                    sccriterion = sibnet_losses.SpatialCoherenceConv(device=device, kernel_size=9)
-                    scloss_value = scloss_scale * sccriterion(upsampled_attr_val, device=device)
-                    loss += scloss_weight * scloss_value
+            upsampled_attr_val = [LayerAttribution.interpolate(attr, torch.squeeze(inputs[0]).shape) for
+                                  attr in attr_classes]
+
+            sccriterion = sibnet_losses.SpatialCoherenceConv(device=device, kernel_size=9)
+            scloss_value = sccriterion(upsampled_attr_val, device=device)
+            if (test_iteration == 0) and (not scloss):
+               scloss_scale = 1 / scloss_value.item()
+            scloss_value *= scloss_scale
+
+            if scloss:
+                loss += scloss_weight * scloss_value
 
             m = nn.Softmax(dim=1)
             outputs = m(outputs).to(device)
             targets = targets.float().resize_(len(targets), 1)
+            predictions = np.argmax(outputs.cpu(), axis=1)
 
             total_loss_wce.append(wceloss.item())
             total_loss_sc.append(scloss_value.item())
@@ -283,6 +322,29 @@ def test(model, evaluator, data_loader, task, device, run, n_classes, cdloss,
             total_loss.append(loss.item())
 
             y_score = torch.cat((y_score, outputs), 0)
+
+            # for the first batch, plot and save the first 10 attribution maps
+            if save_attrmaps:
+                if batch_idx == 0:
+                    epoch_attrimgdir = os.path.join(output_saliencymaps, "epoch-" + str(epoch).zfill(5))
+                    if not os.path.isdir(epoch_attrimgdir):
+                        os.makedirs(epoch_attrimgdir)
+                    for ind in range(5):
+                        currtarget = targets[ind]
+                        for label in range(n_classes):
+                            plt.imshow(np.squeeze(inputs[ind].cpu().numpy()), cmap='gray')
+                            plt.imshow(np.squeeze(upsampled_attr_val[label][ind].cpu().numpy()), alpha=0.3)
+                            plt.axis('off')
+                            plt.title("pred: " + str(predictions[ind].item()) + " true: " + str(int(currtarget.item()))
+                                      + " attr: " + str(label))
+                            plt.tight_layout()
+                            pltpath = os.path.join(epoch_attrimgdir, "sample-" + str(ind) + "-label_"
+                                                   + str(label) + ".png")
+                            plt.savefig(pltpath, bbox_inches='tight')
+                            # plt.show()
+                            plt.close()
+
+            test_iteration += 1
 
         y_score = y_score.detach().cpu().numpy()
         auc, acc, balacc = evaluator.evaluate(y_score, save_folder, run)
@@ -307,7 +369,7 @@ if __name__ == '__main__':
                         help='output root, where to save models and results',
                         type=str)
     parser.add_argument('--num_epochs',
-                        default=100,
+                        default=1000,
                         help='num of epochs of training, the script would only test model if set num_epochs to 0',
                         type=int)
     parser.add_argument('--gpu_ids',
@@ -328,13 +390,13 @@ if __name__ == '__main__':
                         help='convert the grayscale image to RGB',
                         action="store_true")
     parser.add_argument('--run',
-                        default='model1',
+                        default='wce_sc_losses_1000e',
                         help='to name a standard evaluation csv file, named as {flag}_{split}_[AUC]{auc:.3f}_[ACC]{acc:.3f}@{run}.csv',
                         type=str)
     parser.add_argument('--scloss',
-                        default=True,
+                        default=False,
                         help='Bool to turn the spatial coherence loss on or off',
-                        type=bool)
+                        action="store_true")
     parser.add_argument('--scloss_weight',
                         default=0.9,
                         help='Weight of the spatial coherence loss.',
@@ -342,11 +404,15 @@ if __name__ == '__main__':
     parser.add_argument('--cdloss',
                         default=False,
                         help='Bool to turn the class distinctiveness loss on or off',
-                        type=bool)
+                        action="store_true")
     parser.add_argument('--cdloss_weight',
                         default=1.2,
                         help='Weight of the class distinctiveness loss.',
                         type=float)
+    parser.add_argument('--save_attrmaps',
+                        default=True,
+                        help='Bool to turn saving 5 attribution maps per epoch',
+                        action="store_true")
 
     args = parser.parse_args()
     data_flag = args.data_flag
@@ -361,7 +427,8 @@ if __name__ == '__main__':
     cdloss_weight = args.cdloss_weight
     scloss = args.scloss
     scloss_weight = args.scloss_weight
+    save_attrmaps = args.save_attrmaps
     run = args.run
 
     main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resize, as_rgb, run, cdloss,
-         cdloss_weight, scloss, scloss_weight)
+         cdloss_weight, scloss, scloss_weight, save_attrmaps)
