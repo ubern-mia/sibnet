@@ -411,7 +411,7 @@ if __name__ == '__main__':
                         type=float)
     parser.add_argument('--save_attrmaps',
                         default=True,
-                        help='Bool to turn saving 5 attribution maps per epoch',
+                        help='Bool to turn on saving 5 attribution maps per epoch',
                         action="store_true")
 
     args = parser.parse_args()
