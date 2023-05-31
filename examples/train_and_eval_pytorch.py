@@ -25,7 +25,7 @@ from sibnet import evaluator
 from sibnet import sibnet_losses
 
 
-def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resize, as_rgb, run, cdloss,
+def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resize, as_rgb, run, cdloss, cdloss_encode,
          cdloss_weight, scloss, scloss_weight, save_attrmaps):
     lr = 0.001
     gamma = 0.1
@@ -126,14 +126,14 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resi
 
     for epoch in trange(num_epochs):
 
-        train_loss = train(model, train_loader, cdloss, scloss, optimizer, device, writer, n_classes)
+        train_loss = train(model, train_loader, cdloss, cdloss_encode, scloss, optimizer, device, writer, n_classes)
 
         # only save the attribution maps for the test set, in case this option is selected
-        train_metrics = test(model, train_evaluator, train_loader_at_eval, task, device, run, n_classes, cdloss,
+        train_metrics = test(model, train_evaluator, train_loader_at_eval, task, device, run, n_classes, cdloss, cdloss_encode,
          cdloss_weight, scloss, scloss_weight, output_root, epoch, save_attrmaps=False)
-        val_metrics = test(model, val_evaluator, val_loader, task, device, run, n_classes, cdloss,
+        val_metrics = test(model, val_evaluator, val_loader, task, device, run, n_classes, cdloss, cdloss_encode,
          cdloss_weight, scloss, scloss_weight, output_root, epoch, save_attrmaps=False)
-        test_metrics = test(model, test_evaluator, test_loader, task, device, run, n_classes, cdloss,
+        test_metrics = test(model, test_evaluator, test_loader, task, device, run, n_classes, cdloss, cdloss_encode,
          cdloss_weight, scloss, scloss_weight, output_root, epoch, save_attrmaps)
 
         for i, key in enumerate(train_logs):
@@ -161,11 +161,11 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resi
     path = os.path.join(output_root, 'best_model.pth')
     torch.save(state, path)
 
-    train_metrics = test(best_model, train_evaluator, train_loader_at_eval, task, device, run, n_classes, cdloss,
+    train_metrics = test(best_model, train_evaluator, train_loader_at_eval, task, device, run, n_classes, cdloss, cdloss_encode,
          cdloss_weight, scloss, scloss_weight, output_root, save_attrmaps)
-    val_metrics = test(best_model, val_evaluator, val_loader, task, device, run, n_classes, cdloss,
+    val_metrics = test(best_model, val_evaluator, val_loader, task, device, run, n_classes, cdloss, cdloss_encode,
          cdloss_weight, scloss, scloss_weight, output_root, save_attrmaps)
-    test_metrics = test(best_model, test_evaluator, test_loader, task, device, run, n_classes, cdloss,
+    test_metrics = test(best_model, test_evaluator, test_loader, task, device, run, n_classes, cdloss, cdloss_encode,
          cdloss_weight, scloss, scloss_weight, output_root, save_attrmaps)
 
     train_log = 'train  auc: %.5f  acc: %.5f bal_acc: %.5f\n' % (train_metrics[-3], train_metrics[-2], train_metrics[-1])
@@ -181,7 +181,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resi
     writer.close()
 
 
-def train(model, train_loader, cdloss, scloss, optimizer, device, writer, n_classes):
+def train(model, train_loader, cdloss, cdloss_encode, scloss, optimizer, device, writer, n_classes):
     total_loss = []
     global iteration
     global wceloss_scale
@@ -217,6 +217,11 @@ def train(model, train_loader, cdloss, scloss, optimizer, device, writer, n_clas
         if cdloss or scloss:
             cam = LayerGradCam(model, layer=model.layer4)
             attr_classes = [torch.Tensor(cam.attribute(inputs, [i] * inputs.shape[0])) for i in range(n_classes)]
+            if cdloss_encode or scloss:
+                upsampled_attr_val = [LayerAttribution.interpolate(attr, torch.squeeze(inputs[0]).shape) for
+                                      attr in attr_classes]
+            if cdloss_encode:
+                attr_classes = [model(upsampled_attr_image, output_conv = True) for upsampled_attr_image in upsampled_attr_val]
 
             if cdloss:
                 cdcriterion = sibnet_losses.ClassDistinctivenessLoss(device=device)
@@ -226,8 +231,6 @@ def train(model, train_loader, cdloss, scloss, optimizer, device, writer, n_clas
                 loss += cdloss_scale * cdloss_value
 
             if scloss:
-                upsampled_attr_val = [LayerAttribution.interpolate(attr, torch.squeeze(inputs[0]).shape) for
-                                      attr in attr_classes]
                 sccriterion = sibnet_losses.SpatialCoherenceConv(device=device, kernel_size=9)
                 scloss_value = sccriterion(upsampled_attr_val, device=device)
                 if iteration == 0:
@@ -246,7 +249,7 @@ def train(model, train_loader, cdloss, scloss, optimizer, device, writer, n_clas
     return epoch_loss
 
 
-def test(model, evaluator, data_loader, task, device, run, n_classes, cdloss,
+def test(model, evaluator, data_loader, task, device, run, n_classes, cdloss, cdloss_encode,
          cdloss_weight, scloss, scloss_weight, output_root, epoch, save_attrmaps, save_folder=None):
     model.eval()
 
@@ -288,7 +291,11 @@ def test(model, evaluator, data_loader, task, device, run, n_classes, cdloss,
 
             cam = LayerGradCam(model, layer=model.layer4)
             attr_classes = [torch.Tensor(cam.attribute(inputs, [i] * inputs.shape[0])) for i in range(n_classes)]
-
+            upsampled_attr_val = [LayerAttribution.interpolate(attr, torch.squeeze(inputs[0]).shape) for
+                                  attr in attr_classes]
+            if cdloss_encode:
+                attr_classes = [model(upsampled_attr_image, output_conv=True) for upsampled_attr_image in
+                                        upsampled_attr_val]
             # if the sibnet losses are not on, we have to calculate the scaling at test time for a consistent evaluation
             cdcriterion = sibnet_losses.ClassDistinctivenessLoss(device=device)
             cdloss_value = cdcriterion(attr_classes)
@@ -299,8 +306,6 @@ def test(model, evaluator, data_loader, task, device, run, n_classes, cdloss,
             if cdloss:
                 loss += cdloss_weight * cdloss_value
 
-            upsampled_attr_val = [LayerAttribution.interpolate(attr, torch.squeeze(inputs[0]).shape) for
-                                  attr in attr_classes]
 
             sccriterion = sibnet_losses.SpatialCoherenceConv(device=device, kernel_size=9)
             scloss_value = sccriterion(upsampled_attr_val, device=device)
@@ -405,6 +410,10 @@ if __name__ == '__main__':
                         default=False,
                         help='Bool to turn the class distinctiveness loss on or off',
                         action="store_true")
+    parser.add_argument('--cdloss',
+                        default=False,
+                        help='Bool to turn the class distinctivenessloss, the encoded version,  on or off',
+                        action="store_true")
     parser.add_argument('--cdloss_weight',
                         default=1.2,
                         help='Weight of the class distinctiveness loss.',
@@ -424,11 +433,14 @@ if __name__ == '__main__':
     resize = args.resize
     as_rgb = args.as_rgb
     cdloss = args.cdloss
+    cdloss_encode = args.cdloss_encode
+    if not cdloss:
+        cdloss_encode = False
     cdloss_weight = args.cdloss_weight
     scloss = args.scloss
     scloss_weight = args.scloss_weight
     save_attrmaps = args.save_attrmaps
     run = args.run
 
-    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resize, as_rgb, run, cdloss,
+    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, resize, as_rgb, run, cdloss, cdloss_encode,
          cdloss_weight, scloss, scloss_weight, save_attrmaps)
