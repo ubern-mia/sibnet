@@ -410,9 +410,9 @@ if __name__ == '__main__':
                         default=False,
                         help='Bool to turn the class distinctiveness loss on or off',
                         action="store_true")
-    parser.add_argument('--cdloss',
+    parser.add_argument('--cdloss_encode',
                         default=False,
-                        help='Bool to turn the class distinctivenessloss, the encoded version,  on or off',
+                        help='Bool to turn the class distinctivenessloss, the encoded version, on or off',
                         action="store_true")
     parser.add_argument('--cdloss_weight',
                         default=1.2,
