@@ -201,7 +201,7 @@ def train(model, train_loader, cdloss, cdloss_encode, scloss, optimizer, device,
 
         data_hist /= train_loader.batch_size
 
-        ce_weights = torch.Tensor(data_hist).to(device)
+        ce_weights = 1 / torch.Tensor(data_hist).to(device)
         criterion = nn.CrossEntropyLoss(weight=ce_weights)
 
         targets = torch.squeeze(targets, 1).long().to(device)
